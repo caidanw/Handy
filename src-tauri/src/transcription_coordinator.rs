@@ -41,6 +41,7 @@ struct PendingRelease {
 struct PendingPress {
     binding_id: String,
     hotkey_string: String,
+    microphone: Option<String>,
     /// The real key-down time, so a hold that straddles the drain is still
     /// measured from when the user pressed, not from when recording began.
     pressed_at: Instant,
@@ -131,6 +132,7 @@ enum Stage {
 struct InputEvent {
     binding_id: String,
     hotkey_string: String,
+    microphone: Option<String>,
     is_pressed: bool,
     mode: ShortcutActivation,
     /// Hold-or-toggle: minimum press duration that counts as a hold.
@@ -160,6 +162,7 @@ enum Effect {
     Start {
         binding_id: String,
         hotkey_string: String,
+        microphone: Option<String>,
     },
     Stop {
         binding_id: String,
@@ -327,6 +330,7 @@ impl CoordinatorState {
                         locked: input.mode == ShortcutActivation::Toggle,
                         binding_id: input.binding_id,
                         hotkey_string: input.hotkey_string,
+                        microphone: input.microphone,
                         pressed_at: now,
                     });
                 }
@@ -349,6 +353,7 @@ impl CoordinatorState {
                     return Some(self.begin_recording(
                         input.binding_id,
                         input.hotkey_string,
+                        input.microphone,
                         now,
                         locked,
                     ));
@@ -483,6 +488,7 @@ impl CoordinatorState {
         Some(self.begin_recording(
             pending.binding_id,
             pending.hotkey_string,
+            pending.microphone,
             pending.pressed_at,
             pending.locked,
         ))
@@ -504,6 +510,7 @@ impl CoordinatorState {
         &mut self,
         binding_id: String,
         hotkey_string: String,
+        microphone: Option<String>,
         pressed_at: Instant,
         locked: bool,
     ) -> Effect {
@@ -512,6 +519,7 @@ impl CoordinatorState {
         Effect::Start {
             binding_id,
             hotkey_string,
+            microphone,
         }
     }
 
@@ -601,50 +609,43 @@ impl TranscriptionCoordinator {
         mode: ShortcutActivation,
         hold_threshold: Duration,
     ) {
-        self.send(
-            binding_id,
-            hotkey_string,
+        self.send(InputEvent {
+            binding_id: binding_id.to_string(),
+            hotkey_string: hotkey_string.to_string(),
+            microphone: None,
             is_pressed,
             mode,
             hold_threshold,
-            false,
-        );
+            external: false,
+        });
     }
 
     /// Send an external trigger (SIGUSR2, CLI flag). Always a toggle press,
     /// always exempt from debounce — see [`InputEvent::external`].
     pub fn send_external_input(&self, binding_id: &str, source: &str) {
-        self.send(
-            binding_id,
-            source,
-            true,
-            ShortcutActivation::Toggle,
-            Duration::ZERO,
-            true,
-        );
+        self.send_external_input_with_microphone(binding_id, source, None);
     }
 
-    fn send(
+    /// Queue a session-only microphone choice with the toggle, not in settings.
+    pub fn send_external_input_with_microphone(
         &self,
         binding_id: &str,
-        hotkey_string: &str,
-        is_pressed: bool,
-        mode: ShortcutActivation,
-        hold_threshold: Duration,
-        external: bool,
+        source: &str,
+        microphone: Option<String>,
     ) {
-        if self
-            .tx
-            .send(Command::Input(InputEvent {
-                binding_id: binding_id.to_string(),
-                hotkey_string: hotkey_string.to_string(),
-                is_pressed,
-                mode,
-                hold_threshold,
-                external,
-            }))
-            .is_err()
-        {
+        self.send(InputEvent {
+            binding_id: binding_id.to_string(),
+            hotkey_string: source.to_string(),
+            microphone,
+            is_pressed: true,
+            mode: ShortcutActivation::Toggle,
+            hold_threshold: Duration::ZERO,
+            external: true,
+        });
+    }
+
+    fn send(&self, input: InputEvent) {
+        if self.tx.send(Command::Input(input)).is_err() {
             warn!("Transcription coordinator channel closed");
         }
     }
@@ -673,8 +674,9 @@ fn run_effect(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
         Effect::Start {
             binding_id,
             hotkey_string,
+            microphone,
         } => {
-            let started = start(app, &binding_id, &hotkey_string);
+            let started = start(app, &binding_id, &hotkey_string, microphone.as_deref());
             state.on_start_result(&binding_id, started);
         }
         Effect::Stop {
@@ -686,12 +688,12 @@ fn run_effect(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
 
 /// Execute a start effect; returns whether recording actually began, so the
 /// state machine can roll back its optimistic transition on failure.
-fn start(app: &AppHandle, binding_id: &str, hotkey_string: &str) -> bool {
+fn start(app: &AppHandle, binding_id: &str, hotkey_string: &str, microphone: Option<&str>) -> bool {
     let Some(action) = ACTION_MAP.get(binding_id) else {
         warn!("No action in ACTION_MAP for '{binding_id}'");
         return false;
     };
-    action.start(app, binding_id, hotkey_string);
+    action.start(app, binding_id, hotkey_string, microphone);
     let recording = app
         .try_state::<Arc<AudioRecordingManager>>()
         .is_some_and(|a| a.is_recording());
@@ -896,6 +898,7 @@ mod tests {
             mode: ShortcutActivation::PushToTalk,
             hold_threshold: Duration::ZERO,
             external: false,
+            microphone: None,
         }
     }
 
@@ -1034,6 +1037,7 @@ mod tests {
                     mode: ShortcutActivation::Toggle,
                     hold_threshold: Duration::ZERO,
                     external: true,
+                    microphone: None,
                 },
                 at,
             )
@@ -1096,7 +1100,97 @@ mod tests {
             mode: ShortcutActivation::Toggle,
             hold_threshold: Duration::ZERO,
             external,
+            microphone: None,
         }
+    }
+
+    fn microphone_input(name: &str) -> InputEvent {
+        let mut event = toggle_input(true);
+        event.microphone = Some(name.to_string());
+        event
+    }
+
+    #[test]
+    fn session_microphone_only_affects_start_and_does_not_leak() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        assert_eq!(
+            state.on_input(microphone_input("Wireless Mic Rx"), now),
+            Some(Effect::Start {
+                binding_id: BINDING.to_string(),
+                hotkey_string: BINDING.to_string(),
+                microphone: Some("Wireless Mic Rx".to_string()),
+            })
+        );
+        // Even an unavailable name on the stop press must not open a device.
+        assert!(matches!(
+            state.on_input(microphone_input("missing mic"), now),
+            Some(Effect::Stop { .. })
+        ));
+        assert!(state.on_processing_finished().is_none());
+        assert!(matches!(
+            state.on_input(toggle_input(true), now),
+            Some(Effect::Start {
+                microphone: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn queued_start_preserves_its_microphone_and_toggle_parity() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        drive_into_processing(&mut state, now);
+        assert!(state
+            .on_input(microphone_input("Wireless Mic Rx"), now)
+            .is_none());
+        // A different binding cannot overwrite the queued microphone.
+        assert!(state
+            .on_input(toggle_input_for(OTHER_BINDING, true), now)
+            .is_none());
+        assert!(matches!(state.on_processing_finished(),
+            Some(Effect::Start { microphone: Some(name), .. }) if name == "Wireless Mic Rx"));
+
+        state.on_input(toggle_input(true), now);
+        state.on_input(microphone_input("Wireless Mic Rx"), now);
+        state.on_input(microphone_input("another mic"), now);
+        assert!(state.on_processing_finished().is_none());
+    }
+
+    #[test]
+    fn cancel_and_failed_start_do_not_reuse_session_microphone() {
+        let now = Instant::now();
+        let mut state = CoordinatorState::new();
+        state.on_input(microphone_input("Wireless Mic Rx"), now);
+        state.on_start_result(BINDING, false);
+        assert!(matches!(
+            state.on_input(toggle_input(true), now),
+            Some(Effect::Start {
+                microphone: None,
+                ..
+            })
+        ));
+        state.on_cancel(true);
+        assert!(matches!(
+            state.on_input(toggle_input(true), now),
+            Some(Effect::Start {
+                microphone: None,
+                ..
+            })
+        ));
+
+        state.on_input(toggle_input(true), now);
+        state.on_input(microphone_input("Wireless Mic Rx"), now);
+        state.on_cancel(false);
+        assert!(state.on_processing_finished().is_none());
+        assert!(matches!(
+            state.on_input(toggle_input(true), now),
+            Some(Effect::Start {
+                microphone: None,
+                ..
+            })
+        ));
     }
 
     /// Start and stop one toggle recording so the machine sits in `Processing`.
@@ -1221,6 +1315,7 @@ mod tests {
             mode,
             hold_threshold: HOLD_THRESHOLD,
             external: false,
+            microphone: None,
         }
     }
 

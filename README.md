@@ -99,7 +99,21 @@ Handy supports command-line flags for controlling a running instance and customi
 handy --toggle-transcription    # Toggle recording on/off
 handy --toggle-post-process     # Toggle recording with post-processing on/off
 handy --cancel                  # Cancel the current operation
+handy --toggle-transcription --microphone "Wireless Mic Rx"  # Session-only input
 ```
+
+`--microphone NAME` selects an exact microphone name only when a toggle starts
+recording. It also works with `--toggle-post-process`. The next toggle stops the
+active session without switching devices, even if its microphone argument is
+different. An unavailable requested device reports a recording error instead of
+falling back to another microphone.
+
+The override never changes Handy's saved input preference or the system default.
+After stop, cancel, or failed start, normal dictation uses the regular configured
+input again (including restoring the regular stream in always-on mode). Set
+Handy's regular microphone to **Default** to follow the system default between
+overridden sessions. These remote commands require Handy to be running; they do
+not start recording on a cold app launch.
 
 **Startup flags:**
 

@@ -1,0 +1,7 @@
+{
+  "productName": "Handy Session Test",
+  "identifier": "com.pais.handy.session-test",
+  "bundle": {
+    "createUpdaterArtifacts": false
+  }
+}

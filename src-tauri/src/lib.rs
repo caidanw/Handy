@@ -32,6 +32,7 @@ use specta_typescript::{BigIntExportBehavior, Typescript};
 use tauri_specta::{collect_commands, collect_events, Builder};
 pub use utils::env_flag_enabled;
 
+use clap::Parser;
 use env_filter::Builder as EnvFilterBuilder;
 use managers::audio::AudioRecordingManager;
 use managers::history::HistoryManager;
@@ -852,11 +853,29 @@ pub fn run(cli_args: CliArgs) {
     // instance instead.
     if !headless_mode {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            if args.iter().any(|a| a == "--toggle-transcription") {
-                signal_handle::send_transcription_input(app, "transcribe", "CLI");
-            } else if args.iter().any(|a| a == "--toggle-post-process") {
-                signal_handle::send_transcription_input(app, "transcribe_with_post_process", "CLI");
-            } else if args.iter().any(|a| a == "--cancel") {
+            let args = match CliArgs::try_parse_from(args) {
+                Ok(args) => args,
+                Err(error) => {
+                    log::warn!("Invalid remote-control arguments: {error}");
+                    return;
+                }
+            };
+            if args.toggle_transcription || args.toggle_post_process {
+                let binding = if args.toggle_transcription {
+                    "transcribe"
+                } else {
+                    "transcribe_with_post_process"
+                };
+                if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
+                    coordinator.send_external_input_with_microphone(
+                        binding,
+                        "CLI",
+                        args.microphone,
+                    );
+                } else {
+                    log::warn!("TranscriptionCoordinator not initialized");
+                }
+            } else if args.cancel {
                 crate::utils::cancel_current_operation(app);
             } else {
                 // A second process was launched without remote-control flags

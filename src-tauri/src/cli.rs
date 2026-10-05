@@ -3,6 +3,9 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug, Clone, Default)]
 #[command(name = "handy", about = "Handy - Speech to Text")]
+#[command(group(clap::ArgGroup::new("recording_toggle")
+    .args(["toggle_transcription", "toggle_post_process"])
+    .multiple(true)))]
 pub struct CliArgs {
     /// Start with the main window hidden
     #[arg(long)]
@@ -19,6 +22,16 @@ pub struct CliArgs {
     /// Toggle transcription with post-processing on/off (sent to running instance)
     #[arg(long)]
     pub toggle_post_process: bool,
+
+    /// Use this microphone for the recording started by this toggle only
+    #[arg(
+        long,
+        value_name = "NAME",
+        requires = "recording_toggle",
+        conflicts_with_all = ["cancel", "transcribe_file", "list_devices", "list_models"],
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub microphone: Option<String>,
 
     /// Cancel the current operation (sent to running instance)
     #[arg(long)]
@@ -60,4 +73,49 @@ pub struct CliArgs {
     /// Emit --transcribe-file results as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_microphone_parses_forwarded_arguments() {
+        for flag in ["--toggle-transcription", "--toggle-post-process"] {
+            let args = CliArgs::try_parse_from(["handy", flag, "--microphone", "Wireless Mic Rx"])
+                .unwrap();
+            assert_eq!(args.microphone.as_deref(), Some("Wireless Mic Rx"));
+        }
+        let args = CliArgs::try_parse_from([
+            "handy",
+            "--toggle-transcription",
+            "--microphone=Wireless Mic Rx",
+        ])
+        .unwrap();
+        assert_eq!(args.microphone.as_deref(), Some("Wireless Mic Rx"));
+    }
+
+    #[test]
+    fn session_microphone_requires_a_toggle_and_nonempty_name() {
+        for args in [
+            vec!["handy", "--microphone", "Wireless Mic Rx"],
+            vec!["handy", "--cancel", "--microphone", "Wireless Mic Rx"],
+            vec!["handy", "--toggle-transcription", "--microphone", ""],
+            vec!["handy", "--toggle-transcription", "--microphone"],
+            vec![
+                "handy",
+                "--toggle-transcription",
+                "--microphone",
+                "Wireless Mic Rx",
+                "-f",
+                "test.wav",
+            ],
+        ] {
+            assert!(CliArgs::try_parse_from(args).is_err());
+        }
+        assert!(CliArgs::try_parse_from(["handy", "--toggle-transcription"])
+            .unwrap()
+            .microphone
+            .is_none());
+    }
 }
